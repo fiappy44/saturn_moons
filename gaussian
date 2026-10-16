@@ -1,1 +1,110 @@
+"""
+Fit a Gaussian to every profile file under data/ and write one results table.
 
+Expected layout (one folder per observing date):
+
+    data/
+      2026-10-16/
+        titan_img01_x.csv
+        titan_img01_y.csv
+        rhea_img01_x.csv
+        ...
+      2026-10-17/
+        ...
+
+File name format:  <moon>_<image>_<axis>.csv   (axis is x or y)
+Each file: two columns, pixel position and counts (optional text header line).
+
+Output:
+    results/centres.csv      one row per file: date, moon, image, axis, centre, error, fwhm
+    results/plots/*.png      fit plot for each file, to check by eye
+
+Run from the repository's main folder:   python batch_fit.py
+Requires: numpy, scipy, matplotlib
+"""
+import csv
+from pathlib import Path
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")           # save plots to files, don't open windows
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+
+DATA_DIR = Path("data")
+OUT_DIR = Path("results")
+SLOPED_BACKGROUND = False       # True if profiles sit on a gradient (moons near Saturn)
+
+
+def gauss(x, A, mu, sig, c):
+    return A * np.exp(-0.5 * ((x - mu) / sig) ** 2) + c
+
+
+def gauss_slope(x, A, mu, sig, c, m):
+    return gauss(x, A, mu, sig, c) + m * (x - mu)
+
+
+def load(path):
+    try:
+        d = np.loadtxt(path, delimiter=",")
+    except ValueError:
+        d = np.loadtxt(path, delimiter=",", skiprows=1)
+    return d[:, 0], d[:, 1]
+
+
+def fit(x, y):
+    model = gauss_slope if SLOPED_BACKGROUND else gauss
+    p0 = [y.max() - np.median(y), x[np.argmax(y)], 2.0, np.median(y)]
+    if SLOPED_BACKGROUND:
+        p0.append(0.0)
+    popt, pcov = curve_fit(model, x, y, p0=p0, maxfev=20000)
+    perr = np.sqrt(np.diag(pcov))
+    return model, popt, perr
+
+
+def main():
+    (OUT_DIR / "plots").mkdir(parents=True, exist_ok=True)
+    rows, failed = [], []
+
+    for path in sorted(DATA_DIR.glob("*/*.csv")):
+        date = path.parent.name
+        parts = path.stem.split("_")
+        if len(parts) != 3 or parts[2].lower() not in ("x", "y"):
+            failed.append((path, "name should be <moon>_<image>_<x or y>.csv"))
+            continue
+        moon, image, axis = parts[0], parts[1], parts[2].lower()
+
+        try:
+            x, y = load(path)
+            model, popt, perr = fit(x, y)
+        except Exception as e:
+            failed.append((path, str(e)))
+            continue
+
+        centre, centre_err = popt[1], perr[1]
+        fwhm = 2.355 * abs(popt[2])
+        rows.append([date, moon, image, axis, f"{centre:.4f}", f"{centre_err:.4f}", f"{fwhm:.3f}"])
+
+        xs = np.linspace(x.min(), x.max(), 400)
+        plt.figure(figsize=(5, 3.5))
+        plt.plot(x, y, "k.")
+        plt.plot(xs, model(xs, *popt), "r-", label=f"{centre:.2f} ± {centre_err:.2f}")
+        plt.title(path.stem + f"  ({date})", fontsize=9)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(OUT_DIR / "plots" / f"{date}_{path.stem}.png", dpi=110)
+        plt.close()
+
+    with open(OUT_DIR / "centres.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["date", "moon", "image", "axis", "centre_px", "centre_err_px", "fwhm_px"])
+        w.writerows(rows)
+
+    print(f"Fitted {len(rows)} files -> {OUT_DIR / 'centres.csv'}")
+    if failed:
+        print(f"\n{len(failed)} file(s) skipped:")
+        for p, why in failed:
+            print(f"  {p}: {why}")
+
+
+if __name__ == "__main__":
+    main()
