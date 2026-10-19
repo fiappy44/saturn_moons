@@ -12,8 +12,9 @@ Expected layout (one folder per observing date):
       2026-10-17/
         ...
 
-File name format:  <moon>_<image>_<axis>.csv   (axis is x or y)
-Each file: two columns, pixel position and counts (optional text header line).
+File name format:  <moon>_<image>_<axis>.<any extension>   (axis is x or y), e.g. titan_img01_x.txt
+Each file: ASCII numbers separated by spaces. Either just the counts (all on one line or one per line,
+with pixel = position in file + START_PIXEL) or two numbers per line (pixel, counts).
 
 Output:
     results/centres.csv      one row per file: date, moon, image, axis, centre, error, fwhm
@@ -33,6 +34,9 @@ from scipy.optimize import curve_fit
 DATA_DIR = Path("data")
 OUT_DIR = Path("results")
 SLOPED_BACKGROUND = False       # True if profiles sit on a gradient (moons near Saturn)
+START_PIXEL = 0                 # image pixel that the FIRST value in a single-column file corresponds to
+                                # (0 if the file starts at the image edge; if your profile is a box
+                                # cropped from the image, use the box's left or bottom pixel)
 
 
 def gauss(x, A, mu, sig, c):
@@ -44,11 +48,32 @@ def gauss_slope(x, A, mu, sig, c, m):
 
 
 def load(path):
-    try:
-        d = np.loadtxt(path, delimiter=",")
-    except ValueError:
-        d = np.loadtxt(path, delimiter=",", skiprows=1)
-    return d[:, 0], d[:, 1]
+    """Read an ASCII file of numbers separated by spaces (commas also fine).
+    Accepted layouts:
+      - all numbers on one line, or one number per line -> counts, pixel = position + START_PIXEL
+      - two numbers per line -> pixel position, counts
+    Lines that aren't numbers (headers) are skipped."""
+    rows = []
+    with open(path) as f:
+        for line in f:
+            try:
+                vals = [float(t) for t in line.replace(",", " ").split()]
+            except ValueError:
+                continue
+            if vals:
+                rows.append(vals)
+    if not rows:
+        raise ValueError("no numbers found")
+    if len(rows) == 1:
+        y = np.array(rows[0])
+    elif all(len(r) == 1 for r in rows):
+        y = np.array([r[0] for r in rows])
+    elif all(len(r) == 2 for r in rows):
+        arr = np.array(rows)
+        return arr[:, 0], arr[:, 1]
+    else:
+        raise ValueError("expected one number per line, all on one line, or two numbers per line")
+    return np.arange(len(y)) + START_PIXEL, y
 
 
 def fit(x, y):
@@ -65,11 +90,11 @@ def main():
     (OUT_DIR / "plots").mkdir(parents=True, exist_ok=True)
     rows, failed = [], []
 
-    for path in sorted(DATA_DIR.glob("*/*.csv")):
+    for path in sorted(p for p in DATA_DIR.glob("*/*") if p.is_file() and not p.name.startswith(".")):
         date = path.parent.name
         parts = path.stem.split("_")
         if len(parts) != 3 or parts[2].lower() not in ("x", "y"):
-            failed.append((path, "name should be <moon>_<image>_<x or y>.csv"))
+            failed.append((path, "name should be <moon>_<image>_<x or y>.<extension>"))
             continue
         moon, image, axis = parts[0], parts[1], parts[2].lower()
 
