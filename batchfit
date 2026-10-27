@@ -624,44 +624,42 @@ def calculate_angular_separations(centres):
 # SINUSOIDAL FIT
 # ============================================================
 
-def sinusoid(t, offset, amplitude, period, phase):
-    return (
-        offset
-        + amplitude * np.sin(2 * np.pi * t / period + phase)
-    )
-
-
 def fit_sinusoid(t, y, errors, moon):
     """
     Fit an empirical sinusoid.
 
-    The returned t0 is the time origin used by the fitted model.
+    Returns:
+        (t0, parameters, covariance), or None if the data
+        do not support a reliable fit.
+
+    At least six observations spanning a non-zero time interval
+    are required. This is a practical minimum, not a guarantee
+    that the fitted period is well constrained.
     """
 
     good = np.isfinite(t) & np.isfinite(y)
-
-    t = t[good]
-    y = y[good]
-    errors = errors[good]
+    t = np.asarray(t)[good]
+    y = np.asarray(y)[good]
+    errors = np.asarray(errors)[good]
 
     if len(y) < 6 or np.ptp(t) <= 0:
         return None
 
     t0 = t.min()
-    shifted_t = t - t0
-    span = np.ptp(shifted_t)
+    t = t - t0
+    span = np.ptp(t)
 
     period_guess = INITIAL_PERIODS.get(moon, span / 2)
 
     if span < period_guess:
         print(
-            f"Warning: {moon}: data span is shorter than "
-            f"the starting period of {period_guess:.3f} days; "
-            "the period may be poorly constrained."
+            f"Warning: {moon}: the observations span only "
+            f"{span:.2f} days, shorter than the starting period "
+            f"of {period_guess:.3f} days. The fit may be uncertain."
         )
 
     amplitude_guess = max(
-        (y.max() - y.min()) / 2,
+        (np.max(y) - np.min(y)) / 2,
         1e-5,
     )
     offset_guess = np.mean(y)
@@ -688,7 +686,7 @@ def fit_sinusoid(t, y, errors, moon):
     try:
         parameters, covariance = curve_fit(
             sinusoid,
-            shifted_t,
+            t,
             y,
             p0=[
                 offset_guess,
@@ -716,127 +714,281 @@ def fit_sinusoid(t, y, errors, moon):
         print(f"Sinusoidal fit failed for {moon}: {error}")
         return None
 
-
-# ============================================================
-# PLOT ANGULAR SEPARATIONS
-# ============================================================
-
 def plot_angular_separations(df):
+    """
+    Create separate results for every moon and calendar year.
+
+    Outputs:
+        results/angular_separations_2025.csv
+        results/angular_separations_2026.csv
+        results/angular_plots/2025/titan_separation.png
+        results/angular_plots/2026/titan_separation.png
+        results/sinusoidal_fits.csv
+
+    New years are handled automatically.
+    """
+
     ANGULAR_PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for moon, group in df.groupby("moon"):
-        group = group.sort_values("datetime").copy()
+    df = df.copy()
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+    df = df.dropna(subset=["datetime"])
+    df["year"] = df["datetime"].dt.year
 
-        group = group.loc[
-            np.isfinite(group["separation_arcsec"])
+    # Save one measurements CSV per year.
+    for year, year_data in df.groupby("year"):
+        csv_path = OUT_DIR / f"angular_separations_{year}.csv"
+
+        year_data.drop(columns=["year"]).to_csv(
+            csv_path,
+            index=False,
+        )
+
+        print(f"Saved {csv_path}")
+
+    fit_records = []
+
+    # Process every moon separately.
+    for moon, all_moon_data in df.groupby("moon"):
+        all_moon_data = all_moon_data.sort_values("datetime").copy()
+
+        all_moon_data = all_moon_data.loc[
+            np.isfinite(all_moon_data["separation_arcsec"])
         ]
 
-        if group.empty:
+        if all_moon_data.empty:
             continue
 
-        origin = group["datetime"].min()
+        # Common time origin for the combined multi-year fit.
+        global_origin = all_moon_data["datetime"].min()
 
-        t = (
-            group["datetime"] - origin
+        global_t = (
+            all_moon_data["datetime"] - global_origin
         ).dt.total_seconds().to_numpy() / 86400.0
 
-        y = group["separation_arcsec"].to_numpy(dtype=float)
-        errors = group["error_arcsec"].to_numpy(dtype=float)
-
-        valid_errors = np.isfinite(errors) & (errors >= 0)
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        ax.errorbar(
-            t[valid_errors],
-            y[valid_errors],
-            yerr=errors[valid_errors],
-            fmt="o",
-            capsize=3,
-            label="Measurements with uncertainties",
+        global_y = all_moon_data["separation_arcsec"].to_numpy(
+            dtype=float
+        )
+        global_errors = all_moon_data["error_arcsec"].to_numpy(
+            dtype=float
         )
 
-        ax.plot(
-            t[~valid_errors],
-            y[~valid_errors],
-            "o",
-            label="Measurements without uncertainties",
-        )
+        # A combined fit can be used as a reference on yearly plots
+        # when a separate yearly fit cannot be estimated.
+        combined_fit = None
 
-        # Weighted fitting when at least six usable error estimates
-        # exist. Otherwise fit all finite observations unweighted.
-        weighted_points = (
-            np.isfinite(y)
-            & np.isfinite(errors)
-            & (errors > 0)
-        )
-
-        if weighted_points.sum() >= 6:
-            fit_t = t[weighted_points]
-            fit_y = y[weighted_points]
-            fit_errors = errors[weighted_points]
-        else:
-            fit_t = t
-            fit_y = y
-            fit_errors = np.full(len(y), np.nan)
-
-        result = fit_sinusoid(
-            fit_t,
-            fit_y,
-            fit_errors,
-            moon,
-        )
-
-        if result is not None:
-            t0_fit, parameters, covariance = result
-
-            offset, amplitude, period, phase = parameters
-
-            plotted_t = np.linspace(t.min(), t.max(), 1000)
-
-            # Important: use the fit's actual time origin.
-            fitted_y = sinusoid(
-                plotted_t - t0_fit,
-                *parameters,
+        if len(all_moon_data) >= 6:
+            combined_fit = fit_sinusoid(
+                global_t,
+                global_y,
+                global_errors,
+                moon,
             )
 
+        # Produce an independent plot for each year with observations.
+        for year, group in all_moon_data.groupby(
+            all_moon_data["datetime"].dt.year
+        ):
+            group = group.sort_values("datetime").copy()
+
+            year_origin = group["datetime"].min()
+
+            t_year = (
+                group["datetime"] - year_origin
+            ).dt.total_seconds().to_numpy() / 86400.0
+
+            y_year = group["separation_arcsec"].to_numpy(dtype=float)
+            error_year = group["error_arcsec"].to_numpy(dtype=float)
+
+            have_error = (
+                np.isfinite(error_year) & (error_year >= 0)
+            )
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+            # Observations with valid error bars.
+            ax.errorbar(
+                t_year[have_error],
+                y_year[have_error],
+                yerr=error_year[have_error],
+                fmt="o",
+                capsize=3,
+                label="Observed separation with uncertainty",
+            )
+
+            # Retain observations even when their errors are missing.
             ax.plot(
-                plotted_t,
-                fitted_y,
-                "-",
-                label=f"Sinusoidal fit: P = {period:.3f} days",
+                t_year[~have_error],
+                y_year[~have_error],
+                "o",
+                label="Observed separation without uncertainty",
             )
 
-            if np.all(np.isfinite(covariance)):
-                parameter_errors = np.sqrt(
-                    np.maximum(np.diag(covariance), 0)
+            # First preference: fit this year independently.
+            yearly_fit = None
+
+            if len(group) >= 6:
+                yearly_fit = fit_sinusoid(
+                    t_year,
+                    y_year,
+                    error_year,
+                    moon,
                 )
-                period_error = parameter_errors[2]
+
+            fit_type = "none"
+            chosen_fit = None
+
+            if yearly_fit is not None:
+                chosen_fit = yearly_fit
+                fit_type = "yearly fit"
+
+                line_t = np.linspace(
+                    t_year.min(),
+                    t_year.max(),
+                    800,
+                )
+
+                t0_fit, parameters, covariance = chosen_fit
+                line_y = sinusoid(line_t - t0_fit, *parameters)
+
+                fit_label = (
+                    f"{year} sinusoidal fit "
+                    f"(P = {parameters[2]:.3f} days)"
+                )
+
+            elif combined_fit is not None:
+                # Fallback: plot the all-years fit over this year's
+                # date range. This is NOT an independent yearly fit.
+                chosen_fit = combined_fit
+                fit_type = "combined-years reference fit"
+
+                line_t = np.linspace(
+                    t_year.min() if len(t_year) > 1 else t_year[0] - 0.5,
+                    t_year.max() if len(t_year) > 1 else t_year[0] + 0.5,
+                    800,
+                )
+
+                t0_fit, parameters, covariance = chosen_fit
+
+                # Convert the local plotting time into the combined
+                # dataset's time coordinate.
+                year_start_global = (
+                    year_origin - global_origin
+                ).total_seconds() / 86400.0
+
+                line_t_global = line_t + year_start_global
+                line_y = sinusoid(
+                    line_t_global - t0_fit,
+                    *parameters,
+                )
+
+                fit_label = (
+                    f"Combined-years fit reference "
+                    f"(P = {parameters[2]:.3f} days)"
+                )
+
+            if chosen_fit is not None:
+                ax.plot(
+                    line_t,
+                    line_y,
+                    "-",
+                    label=fit_label,
+                )
+
+                if np.all(np.isfinite(covariance)):
+                    parameter_errors = np.sqrt(
+                        np.maximum(np.diag(covariance), 0)
+                    )
+                    period_error = parameter_errors[2]
+                else:
+                    period_error = np.nan
+
+                fit_records.append({
+                    "moon": moon,
+                    "year": year,
+                    "n_observations": len(group),
+                    "fit_type": fit_type,
+                    "offset_arcsec": parameters[0],
+                    "amplitude_arcsec": parameters[1],
+                    "period_days": parameters[2],
+                    "period_error_days": period_error,
+                    "phase_rad": parameters[3],
+                })
+
+                print(
+                    f"{moon} {year} ({fit_type}): "
+                    f"period = {parameters[2]:.4f} days"
+                )
+
             else:
-                period_error = np.nan
+                # Explicitly show why the fit is absent.
+                ax.text(
+                    0.03,
+                    0.97,
+                    "No sinusoidal fit: insufficient observations.\n"
+                    "At least 6 observations are required.",
+                    transform=ax.transAxes,
+                    va="top",
+                    fontsize=9,
+                )
 
-            print(
-                f"{moon}: offset = {offset:.5f} arcsec, "
-                f"amplitude = {amplitude:.5f} arcsec, "
-                f"period = {period:.5f} +/- {period_error:.5f} days"
+                fit_records.append({
+                    "moon": moon,
+                    "year": year,
+                    "n_observations": len(group),
+                    "fit_type": "not fitted: insufficient data",
+                    "offset_arcsec": np.nan,
+                    "amplitude_arcsec": np.nan,
+                    "period_days": np.nan,
+                    "period_error_days": np.nan,
+                    "phase_rad": np.nan,
+                })
+
+                print(
+                    f"{moon} {year}: no fit; "
+                    f"{len(group)} observations available."
+                )
+
+            parent = PARENT_BODY.get(moon, "parent planet")
+
+            ax.set_title(
+                f"{moon.capitalize()}: angular separation "
+                f"from {parent.capitalize()} ({year})"
             )
+            ax.set_xlabel(
+                f"Days since {year_origin:%Y-%m-%d %H:%M}"
+            )
+            ax.set_ylabel("Angular separation (arcseconds)")
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=8)
+            fig.tight_layout()
 
-        ax.set_title(
-            f"{moon.capitalize()}: angular separation "
-            f"from {PARENT_BODY[moon].capitalize()}"
-        )
-        ax.set_xlabel(f"Days since {origin:%Y-%m-%d %H:%M}")
-        ax.set_ylabel("Angular separation (arcseconds)")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        fig.tight_layout()
+            year_dir = ANGULAR_PLOT_DIR / str(year)
+            year_dir.mkdir(parents=True, exist_ok=True)
 
-        output_path = ANGULAR_PLOT_DIR / f"{moon}_separation.png"
-        fig.savefig(output_path, dpi=180)
-        plt.close(fig)
+            fig.savefig(
+                year_dir / f"{moon}_separation.png",
+                dpi=180,
+            )
+            plt.close(fig)
 
-    print(f"Angular plots saved to {ANGULAR_PLOT_DIR}")
+    # Save all successful fits and explicit no-fit records.
+    fit_columns = [
+        "moon", "year", "n_observations", "fit_type",
+        "offset_arcsec", "amplitude_arcsec",
+        "period_days", "period_error_days", "phase_rad",
+    ]
 
+    pd.DataFrame(
+        fit_records,
+        columns=fit_columns,
+    ).to_csv(
+        OUT_DIR / "sinusoidal_fits.csv",
+        index=False,
+    )
+
+    print(f"Yearly plots saved in {ANGULAR_PLOT_DIR}")
+    print(f"Fit summary saved to {OUT_DIR / 'sinusoidal_fits.csv'}")
 
 # ============================================================
 # MAIN PROGRAM
