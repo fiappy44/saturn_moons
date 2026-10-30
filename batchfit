@@ -623,6 +623,8 @@ def calculate_angular_separations(centres):
 # ============================================================
 # SINUSOIDAL FIT
 # ============================================================
+def sinusoid(t, offset, amplitude, period, phase):
+    return offset + amplitude * np.abs(np.sin(2 * np.pi * t / period + phase))
 
 def fit_sinusoid(t, y, errors, moon):
     """

@@ -1,6 +1,12 @@
 moon,year,n_observations,fit_type,offset_arcsec,amplitude_arcsec,period_days,period_error_days,phase_rad
+dione,2025,2,not fitted: insufficient data,,,,,
 dione,2026,3,not fitted: insufficient data,,,,,
+enceladus,2025,2,not fitted: insufficient data,,,,,
 enceladus,2026,3,not fitted: insufficient data,,,,,
-rhea,2026,4,not fitted: insufficient data,,,,,
-tethys,2026,3,not fitted: insufficient data,,,,,
-titan,2026,4,not fitted: insufficient data,,,,,
+rhea,2025,3,combined-years reference fit,1.1193699482757093,81.75325929819128,4.520025032014769,0.0006004523762870567,0.8861290636925201
+rhea,2026,4,combined-years reference fit,1.1193699482757093,81.75325929819128,4.520025032014769,0.0006004523762870567,0.8861290636925201
+tethys,2025,4,combined-years reference fit,38.733868580268556,4.304413793996155,1.8854276648609065,0.004229096245654667,-0.6409218085739535
+tethys,2026,3,combined-years reference fit,38.733868580268556,4.304413793996155,1.8854276648609065,0.004229096245654667,-0.6409218085739535
+titan,2025,4,combined-years reference fit,126.15088294527447,0.47311636018987796,9.693991410120049,11.23679916596912,4.547403149625135
+titan,2026,4,combined-years reference fit,126.15088294527447,0.47311636018987796,9.693991410120049,11.23679916596912,4.547403149625135
+triton,2026,3,not fitted: insufficient data,,,,,
